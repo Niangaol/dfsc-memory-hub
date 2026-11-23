@@ -83,6 +83,24 @@ test('a single shared character is heavily discounted', () => {
   assert.ok(coincidence < genuine, `single-char coincidence ${coincidence} must rank below a real match ${genuine}`);
 });
 
+test('sharing only a single character is not relevance at all', () => {
+  // 结构性规则，不是打分折扣：单字重合必须完全不计入结果，
+  // 否则噪声条目会被返回、并让它的 hits 长期递增。
+  const texts = ['必须靠工具参数 project 显式传', 'memory-hub 已重新生效'];
+  const idf = idfFactory(texts);
+  for (const text of texts) {
+    assert.equal(relevance(queryTokens('数据库索引优化'), tokens(text), idf), 0,
+      `single-character overlap must score 0 for: ${text}`);
+  }
+});
+
+test('a real bigram still clears the floor on its own', () => {
+  const texts = ['构建用 pnpm workspaces', '部署由运维手动触发'];
+  const idf = idfFactory(texts);
+  const value = relevance(queryTokens('构建用什么工具'), tokens(texts[0]), idf);
+  assert.ok(value >= 0.12, `a genuine bigram hit must survive the floor, got ${value}`);
+});
+
 test('searchText includes tags so hand-written keywords are findable', () => {
   assert.match(searchText({ text: '正文', tags: ['构建', '测试'] }), /构建/u);
   assert.equal(searchText({ text: '正文' }), '正文');

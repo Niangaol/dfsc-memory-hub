@@ -33,8 +33,7 @@ const QUALITY = { weight: 0.5, recency: 0.3, tags: 0.2 };
 const BIGRAM_WEIGHT = 1;
 const UNIGRAM_WEIGHT = 0.35;
 const LATIN_WEIGHT = 1;
-// 只靠单字命中的文档要显著打折：中文单字偶然重合太常见。
-const SINGLE_CHAR_ONLY_PENALTY = 0.25;
+// 只共享单个汉字不算相关（见 relevance 的规则 1），因此不再需要按比例打折。
 // 与 query 完全无关的条目给一个极低的底分，而不是 0：让「没有匹配」可被调用方
 // 用阈值判断（recall 自己会按 relevance 过滤，这个底分只影响排序稳定性）。
 const FLOOR = 0.02;
@@ -82,47 +81,46 @@ export function score(memory, query, now = Date.now(), { queryTags = [], idf = u
   return FLOOR + relevanceScore * quality;
 }
 
+/** 有区分度的词元：拉丁整词与中文二字组。单字不算。 */
+export function isDistinctive(token) {
+  return /^[a-z0-9_+-]+$/u.test(token) || [...token].length >= 2;
+}
+
 /**
  * 按 idf 加权的重合度，0..1。
  *
- * 为什么要 idf：中文里「记忆」「文件」这类词几乎出现在所有条目里，
- * 按余弦算它们能贡献大部分分数，真正的区分词（"pnpm"、"memories"）反而被稀释。
+ * 三条规则，前两条是结构性的（不是可调常数）：
  *
- * 两条关键规则：
- *   1. 停用单字不进分母（「是/什么/的」几乎每句都有）。
- *   2. 库里从未出现过的查询词也不进分母。中文按二字组切分，查询会带出
+ *   1. **只共享单个汉字不算相关**。中文单字偶然重合太常见：「数据库索引优化」
+ *      与「工具参数」「重新」这类条目只共享 `数`、`库`，却被算成命中并返回，
+ *      还会把这条噪声的命中数 +1、长期强化它。所以要求至少有一个
+ *      拉丁整词或中文二字组命中，否则直接 0。
+ *   2. **停用单字不进分母**（「是/什么/的」几乎每句都有）。
+ *   3. **库里从未出现过的查询词也不进分母**。中文按二字组切分，一句问法会带出
  *      「户喜」「欢什」「么风」这类只属于这句话的碎片；它们不可能命中任何条目，
- *      留在分母里只会把真正的命中摊薄到门槛以下（实测「用户喜欢什么风格」
- *      因此从命中变成查不到）。
- *
- * 因此当 idf 可用时，分母只统计「库里有文档包含它」的词——这也是唯一可能
- * 产生命中的词。没有 idf 时退回统计除停用词外的全部词元。
+ *      留在分母里只会把真正的命中摊薄到门槛以下。
  */
 export function relevance(needles, memoryTokens, idf = undefined) {
   if (!needles?.length || !memoryTokens?.length) return 0;
   const memorySet = new Set(memoryTokens);
-  const candidates = [...new Set(needles)];
   const weighted = [];
-  for (const token of candidates) {
+  for (const token of new Set(needles)) {
     const weight = tokenWeight(token) * (idf ? idf(token) : 1);
     if (weight > 0) weighted.push({ token, weight });
   }
-  // 查询里每个词都是停用字或库里没见过：确实不相关，不虚构分数。
   if (!weighted.length) return 0;
   let matched = 0;
   let total = 0;
-  let bigramMatched = 0;
+  let distinctiveHit = false;
   for (const { token, weight } of weighted) {
     total += weight;
-    if (memorySet.has(token)) {
-      matched += weight;
-      if ([...token].length >= 2) bigramMatched += 1;
-    }
+    if (!memorySet.has(token)) continue;
+    matched += weight;
+    if (isDistinctive(token)) distinctiveHit = true;
   }
-  if (total === 0) return 0;
-  const ratio = matched / total;
-  // 只有单字命中时显著打折：那种「相关」几乎总是巧合。
-  return bigramMatched === 0 ? ratio * SINGLE_CHAR_ONLY_PENALTY : ratio;
+  // 规则 1：只有单字重合，视为不相关。
+  if (!distinctiveHit) return 0;
+  return total === 0 ? 0 : matched / total;
 }
 
 function tokenWeight(token) {
@@ -130,9 +128,8 @@ function tokenWeight(token) {
   if (/^[a-z0-9_+-]+$/u.test(token)) return LATIN_WEIGHT;
   // 二字组次之。
   if ([...token].length >= 2) return BIGRAM_WEIGHT;
-  // 单字只作为「锦上添花」：中文单字太容易偶然命中（「数据库索引优化」里
-  // 只有「数」在库中出现过，却能算成满命中）。给低权重并额外打折，
-  // 保证「只靠单字命中」的文档不会越过相关度门槛。
+  // 单字只作补充：能否返回由上方的「至少一个区分词命中」决定，
+  // 单字只影响分母与轻微的得分加成。
   return UNIGRAM_WEIGHT;
 }
 

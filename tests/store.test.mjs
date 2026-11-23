@@ -96,8 +96,8 @@ test('recall records a hit so repeated use strengthens the memory', async () => 
 test('recall filters by type and tag', async () => {
   await withBank(async (bank) => {
     await bank.retain({ text: '构建用 pnpm', type: 'fact', tags: ['构建'], project: PROJECT });
-    await bank.retain({ text: '先写测试再实现', type: 'lesson', tags: ['测试'], project: PROJECT });
-    const lessons = await bank.recall({ query: '写', type: 'lesson', project: PROJECT });
+    await bank.retain({ text: '先写测试再实现功能', type: 'lesson', tags: ['测试'], project: PROJECT });
+    const lessons = await bank.recall({ query: '写测试', type: 'lesson', project: PROJECT });
     assert.equal(lessons.memories.length, 1);
     assert.equal(lessons.memories[0].type, 'lesson');
     const tagged = await bank.recall({ query: '构建', tags: ['测试'], project: PROJECT });
