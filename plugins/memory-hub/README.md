@@ -3,7 +3,7 @@
 按项目分库的本地长期记忆插件。让代理记得住这个仓库怎么分工、上次为什么那么定、
 哪些坑踩过——而且这些记忆会自己合并、加权、淘汰，不是一个只进不出的流水账。
 
-资源版本 **0.1.0**，许可证 **MIT**。
+资源版本 **0.2.0**，许可证 **MIT**。
 
 ## 安装后提供什么
 
@@ -122,12 +122,14 @@ MCP 进程的工作目录被宿主锚定到插件目录，拿不到用户项目�
 
 - 上游仓库：[Niangaol/dfsc-memory-hub](https://github.com/Niangaol/dfsc-memory-hub)，资源目录 `plugins/memory-hub`。
 - 最低宿主：`>=0.4.0`（清单形态在 0.4.0 的插件格式内）。
-- 已验证：Node.js 24（Windows）下 `node --test` 全套 75 项通过，另有 `scripts/smoke.mjs` 走真实
-  stdio 闭环 12 步（初始化 → 写入 → 去重 → 脱敏 → 召回 → 失效 → 摘要 → 归纳 → 统计 → 落盘检查
-  → 清空 → 坏输入恢复）；市场校验器 `plugin_manifest` / `plugin_classification` /
-  `checkMetadata` 通过；以插件目录为 cwd、相对路径 args 的启动方式实测可用。
-- **未验证**：DFSC 实机安装与 `/mcp` 挂载。本机安装的是官方 StepFun 0.4.1 外壳，
-  其 `app.asar` 不含插件中心（`capabilityCatalog`），无法安装市场插件；
+- 已验证：Node.js 24（Windows）下 `node --test` 全套 106 项通过；`scripts/smoke.mjs` 走真实
+  stdio 闭环 12 步（初始化 → 写入 → 去重 → 脱敏 → 召回 → 失效 → 摘要 → 归纳 → 统计 →
+  落盘检查 → 清空 → 坏输入恢复）；`scripts/eval.mjs` 的跨会话检索评估 8 正样本全中、
+  2 负样本返回空；市场校验器 `plugin_manifest` / `plugin_classification` / `checkMetadata`
+  通过；以插件目录为 cwd、相对路径 args 的启动方式实测可用；宿主已真实拉起该 MCP
+  并在会话中挂载 8 个工具（父进程为 StepCode.exe）。
+- **未验证**：DFSC 插件中心的 UI 安装。本机安装的是官方 StepFun 0.4.1 外壳，
+  其 `app.asar` 不含插件中心（`capabilityCatalog`），无法从市场安装；
   `scripts/verify-native.mjs` 已备好，指向真正的 DFSC 构建即可运行。
 - 同样未验证：其他 Node 版本与平台、长时间运行、多机（数据只在本机）。
 

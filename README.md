@@ -3,6 +3,8 @@
 本地、按项目分库、会自我进化的长期记忆。灵感来自 Oh My Pi 的 `retain` / `recall` /
 `reflect` / `memory_edit`，但按 DFSC 的实际能力重做：**不依赖会话钩子、不调用模型、不联网**。
 
+资源版本 **0.2.0**，许可证 MIT。
+
 ## 它解决什么
 
 DFSC 的会话默认记不住上一次的事。装好之后，代理可以自己写下「这个仓库构建走 pnpm」
@@ -47,7 +49,7 @@ plugins/memory-hub/
 ## 开发
 
 ```bash
-node --test tests/*.test.mjs     # 84 项：单元 + 协议层 + 边界
+node --test tests/*.test.mjs     # 106 项：单元 + 协议层 + 边界 + 健壮性
 node scripts/smoke.mjs           # 真实 stdio 闭环 12 步
 node scripts/eval.mjs            # 两次会话的检索效果评估（8 正样本 + 2 负样本）
 node scripts/make-icon.mjs       # 重新生成图标
@@ -66,6 +68,7 @@ node scripts/verify-native.mjs --exe "<DFSC 可执行文件>" --playwright "<含
 
 设计文档：[docs/superpowers/specs/2026-11-23-dfsc-memory-hub-design.md](docs/superpowers/specs/2026-11-23-dfsc-memory-hub-design.md)
 实现计划：[docs/superpowers/plans/2026-11-23-memory-hub.md](docs/superpowers/plans/2026-11-23-memory-hub.md)
+变更记录：[CHANGELOG.md](CHANGELOG.md)
 
 ## 收录到 DFSC 社区市场
 

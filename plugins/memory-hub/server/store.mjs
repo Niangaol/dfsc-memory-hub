@@ -67,6 +67,28 @@ function unionTags(left, right) {
   return cleanTags([...(left ?? []), ...(right ?? [])]);
 }
 
+/**
+ * 合并 source 标注：去重 + 保序 + 有界。
+ *
+ * 早期实现只判断子串是否已存在，于是 "session:a" 与 "session:a,b" 会互相包含，
+ * 反复合并后 source 变成越来越长的重复串。这里改成按条目去重，并限制条数与总长度。
+ */
+const MAX_SOURCE_ITEMS = 4;
+function mergeSource(existing, incoming) {
+  const items = [];
+  for (const raw of [existing, incoming]) {
+    for (const part of String(raw ?? '').split(',')) {
+      const value = tidy(part).slice(0, 80);
+      if (!value) continue;
+      if (items.some((item) => item.toLowerCase() === value.toLowerCase())) continue;
+      items.push(value);
+    }
+  }
+  const kept = items.slice(-MAX_SOURCE_ITEMS);
+  if (items.length > MAX_SOURCE_ITEMS) kept[0] = `…(+${items.length - MAX_SOURCE_ITEMS})`;
+  return clip(kept.join(', '), 200);
+}
+
 function emptyBank(slug) {
   return { version: BANK_VERSION, slug, memories: [], updatedAt: new Date().toISOString() };
 }
@@ -145,16 +167,23 @@ export class MemoryBank {
       const bank = readBank(data, slug);
       const candidate = { text, type, tags, importance };
       const existing = findMergeCandidate(bank.memories, candidate);
+      // 两条分支共用同一套收尾：衰减与淘汰必须在每次写入后都跑，
+      // 早期只在新增分支跑，于是「一直合并」的项目永远不会清理过期条目。
+      const settle = () => {
+        applyDecay(bank.memories, now, DECAY_DAYS);
+        const evicted = evictOverflow(bank.memories, cap, now).evicted;
+        bank.updatedAt = new Date(now).toISOString();
+        return evicted;
+      };
       if (existing) {
         existing.importance = Math.max(existing.importance ?? 0.5, importance);
         existing.tags = unionTags(existing.tags, tags);
-        existing.text = (existing.text ?? '').length >= text.length ? existing.text : text;
+        // 合并时保留更完整的说法，但不让手滑加的空格赢过干净文本：
+        // 先比归一化后的长度，等长则保留已有（先写下的）那条。
+        if (tidy(text).length > tidy(existing.text).length) existing.text = text;
         existing.updatedAt = new Date(now).toISOString();
-        if (source && !String(existing.source ?? '').includes(source)) {
-          existing.source = clip(`${existing.source ?? ''}, ${source}`.replace(/^, /u, ''), 200);
-        }
-        const evicted = evictOverflow(bank.memories, cap, now).evicted;
-        bank.updatedAt = new Date(now).toISOString();
+        existing.source = mergeSource(existing.source, source);
+        const evicted = settle();
         return {
           result: {
             ok: true, id: existing.id, action: 'merged', bank: scope, total: countsOf(bank.memories).active,
@@ -177,9 +206,7 @@ export class MemoryBank {
         source,
       };
       bank.memories.push(memory);
-      applyDecay(bank.memories, now, DECAY_DAYS);
-      const evicted = evictOverflow(bank.memories, cap, now).evicted;
-      bank.updatedAt = new Date(now).toISOString();
+      const evicted = settle();
       return {
         result: {
           ok: true, id: memory.id, action: 'added', bank: scope, total: countsOf(bank.memories).active,
@@ -201,65 +228,90 @@ export class MemoryBank {
     const queryTags = cleanTags(input.tags);
     const now = this.clock();
     const wanted = new Set(queryTags.map((tag) => normalize(tag)));
-    const status = STATUSES.includes(input.status) ? input.status : input.status === 'all' ? 'all' : 'active';
+    const status = input.status === 'all' ? 'all' : STATUSES.includes(input.status) ? input.status : 'active';
     const banks = [];
 
     if (scope === 'project' || scope === 'all') banks.push({ bank: 'project', slug: resolved.slug });
     if (scope === 'global' || scope === 'all') banks.push({ bank: 'global', slug: GLOBAL_SLUG });
 
-    // 有 query 时先读全部候选，用 idf 加权的重合度打分，再按相关度阈值过滤。
-    // 只按「词元是否有交集」过滤太粗：中文单字让每句话都沾边，
-    // 需要 idf 把「几乎每条都有」的词压低，让真正的区分词决定排名。
-    const picked = [];
-    let scanned = 0;
+    // 第一阶段：无锁读取 + 打分。查询不该为了算分而写盘。
+    const pools = [];
     for (const { bank, slug } of banks) {
-      const store = this.store(slug);
-      const rows = await store.mutate((data) => {
-        const value = readBank(data, slug);
-        const candidates = [];
-        for (const memory of value.memories) {
-          if (status !== 'all' && memory.status !== status) continue;
-          if (status === 'active' && memory.status !== 'active') continue;
-          if (TYPES.includes(input.type) && memory.type !== input.type) continue;
-          const owned = new Set((memory.tags ?? []).map((tag) => normalize(tag)));
-          const tagOverlap = [...wanted].filter((tag) => owned.has(tag)).length;
-          if (wanted.size && !tagOverlap) continue;
-          candidates.push({ memory, tagOverlap });
+      const { data, corrupt } = await this.store(slug).read();
+      if (corrupt) {
+        this.log(`recall skipped a corrupt bank: ${slug}`);
+        continue;
+      }
+      const memories = readBank(data, slug).memories.filter((memory) => {
+        if (status !== 'all' && memory.status !== status) return false;
+        if (TYPES.includes(input.type) && memory.type !== input.type) return false;
+        if (wanted.size) {
+          const owned = (memory.tags ?? []).map((tag) => normalize(tag));
+          if (![...wanted].some((tag) => owned.includes(tag))) return false;
         }
-        scanned += candidates.length;
-        if (!candidates.length) return { result: [], next: data };
-
-        // idf 用正文 + 标签一起估：标签本来就是手写关键词，应当能被搜到。
-        const idf = query ? idfFactory(candidates.map(({ memory }) => searchText(memory))) : undefined;
-        const hits = [];
-        for (const { memory, tagOverlap } of candidates) {
-          if (query) {
-            // 给了 query 就必须在正文或标签里真的讲到它：标签只用来收窄范围与加权，
-            // 不能让一条完全没提到查询词的记忆因为标签相同而返回。
-            if (relevance(queryTokens(query), tokens(searchText(memory)), idf) < RELEVANCE_FLOOR) continue;
-          }
-          const value2 = query
-            ? score(memory, query, now, { queryTags, idf })
-            : effectiveWeight(memory, now);
-          hits.push({ ...memory, score: value2, bank, tags: memory.tags ?? [] });
-        }
-        let changed = false;
-        for (const hit of hits) {
-          const memory = value.memories.find((item) => item.id === hit.id);
-          if (!memory) continue;
-          memory.hits = (memory.hits ?? 0) + 1;
-          memory.lastHitAt = new Date(now).toISOString();
-          hit.hits = memory.hits;
-          hit.lastHitAt = memory.lastHitAt;
-          changed = true;
-        }
-        return { result: hits, next: changed ? value : data };
+        return true;
       });
-      picked.push(...(rows ?? []));
+      pools.push({ bank, slug, memories });
+    }
+    const scanned = pools.reduce((total, pool) => total + pool.memories.length, 0);
+
+    // idf 在整个候选池上估一次，而不是每个库各估一次：否则同一个词在两个库里
+    // 权重不同，跨库排序会偏向条目少的那个库。
+    const needles = query ? queryTokens(query) : [];
+    const idf = query
+      ? idfFactory(pools.flatMap((pool) => pool.memories).map((memory) => searchText(memory)))
+      : undefined;
+
+    const scored = [];
+    for (const pool of pools) {
+      for (const memory of pool.memories) {
+        if (query) {
+          // 给了 query 就必须在正文或标签里真的讲到它：标签只用来收窄范围与加权，
+          // 不能让一条完全没提到查询词的记忆因为标签相同而返回。
+          if (relevance(needles, tokens(searchText(memory)), idf) < RELEVANCE_FLOOR) continue;
+        }
+        const value = query
+          ? score(memory, query, now, { queryTags, idf })
+          : effectiveWeight(memory, now);
+        scored.push({ ...memory, score: value, bank: pool.bank, tags: memory.tags ?? [] });
+      }
+    }
+    scored.sort((a, b) => b.score - a.score);
+    const memories = scored.slice(0, limit);
+
+    // 第二阶段：只给真正返回的条目记命中。
+    // 早期实现给「所有匹配」都 +1，等于没返回的条目也在被强化，权重会长期失真。
+    if (memories.length) {
+      const byBank = new Map();
+      for (const memory of memories) {
+        if (!byBank.has(memory.bank)) byBank.set(memory.bank, new Set());
+        byBank.get(memory.bank).add(memory.id);
+      }
+      for (const [bankLabel, ids] of byBank) {
+        const slug = bankLabel === 'global' ? GLOBAL_SLUG : resolved.slug;
+        await this.store(slug).mutate((data) => {
+          const value = readBank(data, slug);
+          let changed = false;
+          for (const memory of value.memories) {
+            if (!ids.has(memory.id)) continue;
+            memory.hits = (memory.hits ?? 0) + 1;
+            memory.lastHitAt = new Date(now).toISOString();
+            changed = true;
+          }
+          return { result: null, next: changed ? value : data };
+        });
+        // 返回给调用方的 hit 计数要与落盘一致
+        for (const memory of memories) {
+          if (memory.bank !== bankLabel) continue;
+          const stored = readBank((await this.store(slug).read()).data, slug).memories.find((item) => item.id === memory.id);
+          if (stored) {
+            memory.hits = stored.hits;
+            memory.lastHitAt = stored.lastHitAt;
+          }
+        }
+      }
     }
 
-    picked.sort((a, b) => b.score - a.score);
-    const memories = picked.slice(0, limit);
     return {
       ok: true,
       scope,
@@ -341,52 +393,63 @@ export class MemoryBank {
     if (op === 'forget' && String(input.confirm ?? '') !== 'yes' && String(input.confirm ?? '').toUpperCase() !== 'DELETE') {
       throw new Error('forget requires confirm: "yes"');
     }
-    const scope = input.scope === 'global' ? 'global' : 'project';
-    const slug = this.slugFor(scope, resolved.slug);
     const now = this.clock();
+    // 没指定 scope 时先查项目库，找不到再查全局库：recall 可以跨库返回条目，
+    // 如果 edit 只能改项目库，用户拿到一个全局记忆的 id 就永远改不了它。
+    const scopeHint = input.scope === 'global' || input.scope === 'project' ? input.scope : null;
+    const order = scopeHint ? [scopeHint] : ['project', 'global'];
 
-    return this.store(slug).mutate((data) => {
-      const bank = readBank(data, slug);
-      const index = bank.memories.findIndex((memory) => memory.id === id);
-      if (index === -1) {
-        return { result: { ok: false, status: 'not_found', id, bank: scope }, next: data };
-      }
-      const memory = bank.memories[index];
-      if (op === 'forget') {
-        bank.memories.splice(index, 1);
-        bank.updatedAt = new Date(now).toISOString();
-        return { result: { ok: true, status: 'deleted', id, bank: scope }, next: bank };
-      }
-      if (op === 'update') {
-        const raw = redact(String(input.text ?? ''));
-        if (input.text !== undefined) {
-          const text = clip(tidy(raw.text), MAX_TEXT);
-          if (!text) throw new Error('update needs non-empty text');
-          memory.text = text;
+    let lastMiss = null;
+    for (const scope of order) {
+      const slug = this.slugFor(scope, resolved.slug);
+      const outcome = await this.store(slug).mutate((data) => {
+        const bank = readBank(data, slug);
+        const index = bank.memories.findIndex((memory) => memory.id === id);
+        if (index === -1) return { result: { miss: true, bank: scope }, next: data };
+        const memory = bank.memories[index];
+        const done = (status, extra = {}) => {
+          bank.updatedAt = new Date(now).toISOString();
+          return { result: { ok: true, status, id, bank: scope, memory, ...extra }, next: bank };
+        };
+        if (op === 'forget') {
+          bank.memories.splice(index, 1);
+          bank.updatedAt = new Date(now).toISOString();
+          return { result: { ok: true, status: 'deleted', id, bank: scope, memory }, next: bank };
         }
-        if (input.importance !== undefined) memory.importance = clampNumber(input.importance, 0, 1, memory.importance ?? 0.5);
-        if (input.tags !== undefined) memory.tags = cleanTags(input.tags);
-        if (input.type !== undefined && TYPES.includes(input.type)) memory.type = input.type;
+        if (op === 'update') {
+          const raw = redact(String(input.text ?? ''));
+          if (input.text !== undefined) {
+            const text = clip(tidy(raw.text), MAX_TEXT);
+            if (!text) throw new Error('update needs non-empty text');
+            memory.text = text;
+          }
+          if (input.importance !== undefined) memory.importance = clampNumber(input.importance, 0, 1, memory.importance ?? 0.5);
+          if (input.tags !== undefined) memory.tags = cleanTags(input.tags);
+          if (input.type !== undefined && TYPES.includes(input.type)) memory.type = input.type;
+          memory.updatedAt = new Date(now).toISOString();
+          return done('updated', { redacted: raw.redacted });
+        }
+        if (op === 'invalidate') {
+          memory.status = 'invalidated';
+          memory.updatedAt = new Date(now).toISOString();
+          if (input.replacementId) memory.supersededBy = String(input.replacementId);
+          return done('invalidated');
+        }
+        if (op === 'archive') {
+          memory.status = 'archived';
+          memory.updatedAt = new Date(now).toISOString();
+          return done('archived');
+        }
+        // restore
+        memory.status = 'active';
         memory.updatedAt = new Date(now).toISOString();
-        return { result: { ok: true, status: 'updated', id, bank: scope, memory, redacted: raw.redacted }, next: bank };
-      }
-      if (op === 'invalidate') {
-        memory.status = 'invalidated';
-        memory.updatedAt = new Date(now).toISOString();
-        if (input.replacementId) memory.supersededBy = String(input.replacementId);
-        return { result: { ok: true, status: 'invalidated', id, bank: scope, memory }, next: bank };
-      }
-      if (op === 'archive') {
-        memory.status = 'archived';
-        memory.updatedAt = new Date(now).toISOString();
-        return { result: { ok: true, status: 'archived', id, bank: scope, memory }, next: bank };
-      }
-      // restore
-      memory.status = 'active';
-      memory.updatedAt = new Date(now).toISOString();
-      delete memory.supersededBy;
-      return { result: { ok: true, status: 'restored', id, bank: scope, memory }, next: bank };
-    });
+        delete memory.supersededBy;
+        return done('restored');
+      });
+      if (outcome && !outcome.miss) return outcome;
+      lastMiss = outcome;
+    }
+    return { ok: false, status: 'not_found', id, bank: lastMiss?.bank ?? 'project', searched: order };
   }
 
   // ---------- maintenance ----------
@@ -464,19 +527,19 @@ export class MemoryBank {
     let removed = 0;
     for (const { label, slug } of targets) {
       const store = this.store(slug);
-      const { data } = await store.read();
-      const count = readBank(data, slug).memories.length;
-      removed += count;
-      try {
-        const stamp = new Date().toISOString().replace(/[:.]/gu, '-');
+      // 计数与改名必须在同一把锁里完成：先 read 再 rename 的间隙里，
+      // 另一个会话可能刚写入，那样「移走了 N 条」的 N 和实际文件对不上。
+      const cleaned = await store.inspect(async (parsed) => {
+        if (parsed === null) return null;
+        const count = readBank(parsed.corrupt ? null : parsed.data, slug).memories.length;
+        const stamp = new Date(this.clock()).toISOString().replace(/[:.]/gu, '-');
         const target = `${store.file}.trash-${stamp}`;
         await fs.promises.rename(store.file, target);
-        store._cache = null;
-        store._cachedRaw = null;
-        moved.push({ bank: label, path: target, memories: count });
-      } catch (error) {
-        if (error?.code !== 'ENOENT') throw error;
-      }
+        return { count, target, corrupt: Boolean(parsed.corrupt) };
+      });
+      if (!cleaned) continue;
+      removed += cleaned.count;
+      moved.push({ bank: label, path: cleaned.target, memories: cleaned.count, corrupt: cleaned.corrupt });
     }
     return { ok: true, removed, moved, movedTo: moved[0]?.path ?? null };
   }

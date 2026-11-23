@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, utimes, appendFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, utimes, appendFile, rm, truncate } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { digestSessions } from '../plugins/memory-hub/server/digest.mjs';
@@ -110,6 +110,42 @@ test('digest ignores tool output and malformed lines', async () => {
     const result = await digestSessions({ sessionsRoot: root, slug: SLUG, count: 5, maxChars: 5000 });
     assert.ok(result.text.includes('人的提问'));
     assert.ok(!result.text.includes('工具输出'));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an empty session does not give later sessions a bigger share', async () => {
+  const { root, dir } = await fixture();
+  try {
+    // 三个文件：第一个几乎为空，后两个很长。按「剩余 / 剩余文件数」分配时，
+    // 空文件不该把预算让给后来的文件而整体溢出。
+    await writeFile(join(dir, '2026-11-23T00-00-00-000Z_empty.jsonl'), line('toolResult', 'x') + '\n');
+    for (const name of ['2026-11-22T00-00-00-000Z_a.jsonl', '2026-11-21T00-00-00-000Z_b.jsonl']) {
+      await writeFile(join(dir, name), line('user', '内容'.repeat(400)) + '\n');
+    }
+    const result = await digestSessions({ sessionsRoot: root, slug: SLUG, count: 5, maxChars: 900 });
+    assert.ok(result.text.length <= 900, `got ${result.text.length} characters`);
+    assert.equal(result.truncated, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an oversized session file is skipped instead of read into memory', async () => {
+  const { root, dir } = await fixture();
+  try {
+    const small = join(dir, '2026-11-23T00-00-00-000Z_small.jsonl');
+    await writeFile(small, line('user', '正常大小') + '\n');
+    const huge = join(dir, '2026-11-23T00-00-00-000Z_huge.jsonl');
+    // 稀疏文件：逻辑大小超过上限但不真的占 32 MiB 磁盘
+    await writeFile(huge, '');
+    await truncate(huge, 33 * 1024 * 1024);
+    const { listSessions } = await import('../plugins/memory-hub/server/digest.mjs');
+    const listed = listSessions(root, SLUG).map((entry) => entry.name);
+    assert.deepEqual(listed, ['2026-11-23T00-00-00-000Z_small.jsonl'], `oversized file was not filtered: ${listed}`);
+    const result = await digestSessions({ sessionsRoot: root, slug: SLUG, count: 5, maxChars: 4000 });
+    assert.ok(result.text.includes('正常大小'));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

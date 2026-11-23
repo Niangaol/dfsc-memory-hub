@@ -1,11 +1,31 @@
 {
   "schemaVersion": 1,
-  "authors": [{ "name": "Niangaol" }],
-  "maintainers": [{ "name": "Niangaol" }],
+  "authors": [
+    {
+      "name": "Niangaol"
+    }
+  ],
+  "maintainers": [
+    {
+      "name": "Niangaol"
+    }
+  ],
   "license": "MIT",
-  "categories": ["knowledge", "development"],
-  "keywords": ["长期记忆", "项目上下文", "自进化", "memory", "跨会话"],
-  "documentation": { "readme": "README.md" },
+  "categories": [
+    "knowledge",
+    "development"
+  ],
+  "keywords": [
+    "长期记忆",
+    "项目上下文",
+    "自进化",
+    "memory",
+    "跨会话"
+  ],
+  "documentation": {
+    "readme": "README.md",
+    "changelog": "CHANGELOG.md"
+  },
   "requirements": {
     "dfsc": ">=0.4.0",
     "external": [

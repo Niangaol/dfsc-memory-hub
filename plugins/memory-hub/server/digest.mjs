@@ -16,6 +16,9 @@ import { redact } from './text.mjs';
 
 const MAX_LINE_BYTES = 8 * 1024;
 const MAX_LINE_CHARS = 2000;
+// 单个会话文件上限。一次巩固读的是「素材」而不是归档，超过这个尺寸说明它不是
+// 正常的人类对话（例如被粘贴了大段构建日志），直接跳过比读进内存更安全。
+const MAX_SESSION_BYTES = 32 * 1024 * 1024;
 
 export function listSessions(sessionsRoot, slug) {
   const dir = path.join(sessionsRoot, slug);
@@ -32,6 +35,7 @@ export function listSessions(sessionsRoot, slug) {
     const file = path.join(dir, entry.name);
     try {
       const info = fs.statSync(file);
+      if (info.size > MAX_SESSION_BYTES) continue;
       files.push({ file, name: entry.name, mtimeMs: info.mtimeMs, size: info.size });
     } catch {
       /* 文件在扫描后被删除：跳过 */
@@ -95,8 +99,8 @@ async function readSession(file, budget) {
 }
 
 export async function digestSessions({ sessionsRoot, slug, count = 3, maxChars = 12_000 } = {}) {
-  const wanted = Math.min(10, Math.max(1, Number(count) || 3));
-  const budget = Math.min(60_000, Math.max(1000, Number(maxChars) || 12_000));
+  const wanted = Math.min(10, Math.max(1, Math.floor(Number(count) || 3)));
+  const budget = Math.min(60_000, Math.max(1000, Math.floor(Number(maxChars) || 12_000)));
   const files = listSessions(sessionsRoot, slug).slice(0, wanted);
   if (!files.length) return { ok: true, sessions: [], text: '', truncated: false, chars: 0 };
 
@@ -104,27 +108,44 @@ export async function digestSessions({ sessionsRoot, slug, count = 3, maxChars =
   const blocks = [];
   let remaining = budget;
   let truncated = false;
-  for (const entry of files) {
+  for (let index = 0; index < files.length; index += 1) {
     if (remaining <= 0) {
       truncated = true;
       break;
     }
-    const remainingForFile = Math.max(200, Math.floor(remaining / Math.max(1, files.length - sessions.length)));
-    const { lines, truncated: cut } = await readSession(entry.file, remainingForFile);
+    // 按「剩余预算 / 剩余文件数」切分，且只按剩余文件数算——早期用
+    // (files.length - sessions.length)，一个空会话就会让后面的文件多分预算并整体溢出。
+    const filesLeft = files.length - index;
+    const share = Math.max(200, Math.floor(remaining / filesLeft));
+    const entry = files[index];
+    const { lines, truncated: cut } = await readSession(entry.file, Math.min(share, remaining));
     truncated = truncated || cut;
-    if (!lines.length) continue;
-    const body = `### 会话 ${entry.name}\n${lines.join('\n')}`;
-    sessions.push({ file: entry.name, messages: lines.length, chars: body.length });
+    if (!lines.length) {
+      // 空/全被过滤的会话不占预算，但要记一笔，避免调用方以为没扫到文件。
+      sessions.push({ file: entry.name, messages: 0, chars: 0 });
+      continue;
+    }
+    const header = `### 会话 ${entry.name}`;
+    // 头部也算进预算，否则只有条文时总长仍会超出 maxChars。
+    const body = `${header}\n${lines.join('\n')}`;
+    if (body.length > remaining) {
+      blocks.push(body.slice(0, remaining));
+      remaining = 0;
+      truncated = true;
+      sessions.push({ file: entry.name, messages: lines.length, chars: remaining });
+      break;
+    }
     blocks.push(body);
-    remaining -= body.length;
+    sessions.push({ file: entry.name, messages: lines.length, chars: body.length });
+    remaining -= body.length + 2;
   }
   const text = blocks.join('\n\n');
-  const clippedText = text.length > budget ? text.slice(0, budget) : text;
+  const clipped = text.length > budget ? text.slice(0, budget) : text;
   return {
     ok: true,
     sessions,
-    text: clippedText,
-    truncated: truncated || clippedText.length < text.length,
-    chars: clippedText.length,
+    text: clipped,
+    truncated: truncated || clipped.length < text.length,
+    chars: clipped.length,
   };
 }

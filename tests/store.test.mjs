@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MemoryBank } from '../plugins/memory-hub/server/store.mjs';
@@ -214,6 +214,102 @@ test('a write after the retention window archives the untouched memory', async (
     assert.equal(stats.banks.project.archived, 1);
     const { memories } = await clocked.recall({ query: '很久没用', status: 'archived', project: PROJECT });
     assert.equal(memories.length, 1, '归档条目仍可查到，不是被删掉');
+  });
+});
+
+test('merging also runs decay, not only the add path', async () => {
+  await withBank(async (bank) => {
+    let now = Date.UTC(2026, 10, 1);
+    const clocked = new MemoryBank({ home: bank.home, clock: () => now });
+    await clocked.retain({ text: '构建用 pnpm', project: PROJECT });
+    await clocked.retain({ text: '一条不相干的旧结论', project: PROJECT });
+    now += 70 * 86_400_000;
+    // 这次写入会合并到已有条目（merged 分支），早期实现该分支不做衰减，
+    // 于是「一直在合并」的项目永远不清过期条目。
+    const merged = await clocked.retain({ text: '构建用 pnpm', project: PROJECT });
+    assert.equal(merged.action, 'merged');
+    const stats = await clocked.stats({ project: PROJECT });
+    assert.ok(stats.banks.project.archived >= 1, `expected decay on the merge path, saw ${JSON.stringify(stats.banks.project)}`);
+  });
+});
+
+test('recall only counts hits for the memories it returns', async () => {
+  await withBank(async (bank) => {
+    for (let i = 0; i < 4; i++) await bank.retain({ text: `构建细节 ${i}`, project: PROJECT });
+    const first = await bank.recall({ query: '构建', limit: 1, project: PROJECT });
+    assert.equal(first.memories.length, 1);
+    // 直接看落盘：limit=1 只该给那一条记命中，其余三条必须还是 0。
+    const { data } = await bank.store(bank.resolve(PROJECT).slug).read();
+    const hits = data.memories.map((memory) => memory.hits).sort((a, b) => a - b);
+    assert.deepEqual(hits, [0, 0, 0, 1], `unexpected hit counts: ${hits}`);
+  });
+});
+
+test('a read-only style query does not write the bank when nothing matches', async () => {
+  await withBank(async (bank, home) => {
+    await bank.retain({ text: '构建用 pnpm', project: PROJECT });
+    const file = join(home, '--D--AgentPrograms-demo--', 'memory.json');
+    const before = await readFile(file, 'utf8');
+    const { memories } = await bank.recall({ query: '完全无关的部署话题', project: PROJECT });
+    assert.deepEqual(memories, []);
+    assert.equal(await readFile(file, 'utf8'), before, 'a query that matches nothing must not rewrite the store');
+  });
+});
+
+test('edit falls back to the global bank when the id lives there', async () => {
+  await withBank(async (bank) => {
+    const { id } = await bank.retain({ text: '回答用中文', scope: 'global', project: PROJECT });
+    // 不传 scope：先查项目库，找不到再查全局库
+    const updated = await bank.edit({ op: 'update', id, text: '回答一律用中文', project: PROJECT });
+    assert.equal(updated.status, 'updated');
+    assert.equal(updated.bank, 'global');
+  });
+});
+
+test('edit reports which banks it searched when the id is unknown', async () => {
+  await withBank(async (bank) => {
+    const result = await bank.edit({ op: 'update', id: 'm_missing', text: 'x', project: PROJECT });
+    assert.equal(result.status, 'not_found');
+    assert.deepEqual(result.searched, ['project', 'global']);
+  });
+});
+
+test('repeated merges keep the source label bounded and deduplicated', async () => {
+  await withBank(async (bank) => {
+    for (let i = 0; i < 8; i++) {
+      await bank.retain({ text: '构建用 pnpm', source: `session:${i}`, project: PROJECT });
+    }
+    const { memories } = await bank.recall({ query: '构建用 pnpm', project: PROJECT });
+    const source = memories[0].source;
+    assert.ok(source.length <= 200, `source grew to ${source.length} chars`);
+    const parts = source.split(',').map((part) => part.trim());
+    assert.equal(new Set(parts).size, parts.length, `duplicate source items: ${source}`);
+    assert.ok(parts.length <= 4, `expected at most 4 source items, got ${parts.length}: ${source}`);
+  });
+});
+
+test('merging keeps the cleaner text when whitespace was the only difference', async () => {
+  await withBank(async (bank) => {
+    await bank.retain({ text: '构建用 pnpm workspaces', project: PROJECT });
+    await bank.retain({ text: '构建用   pnpm workspaces ', project: PROJECT });
+    const { memories } = await bank.recall({ query: '构建用 pnpm', project: PROJECT });
+    assert.equal(memories.length, 1);
+    assert.equal(memories[0].text, '构建用 pnpm workspaces');
+  });
+});
+
+test('purge keeps a corrupt store contents intact in the trash file', async () => {
+  await withBank(async (bank, home) => {
+    const dir = join(home, '--D--AgentPrograms-demo--');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'memory.json'), 'broken on purpose');
+    const result = await bank.purge({ scope: 'project', confirm: 'DELETE', project: PROJECT });
+    assert.equal(result.ok, true);
+    assert.equal(result.moved[0].corrupt, true, 'a corrupt bank is still moved, flagged as corrupt');
+    const names = await readdir(dir);
+    const trash = names.find((name) => name.startsWith('memory.json.trash-'));
+    assert.ok(trash, `trash file missing: ${names}`);
+    assert.equal(await readFile(join(dir, trash), 'utf8'), 'broken on purpose');
   });
 });
 
