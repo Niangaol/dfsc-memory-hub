@@ -1,0 +1,16 @@
+{
+  "name": "dfsc-memory-hub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local, project-scoped self-evolving memory for Step Code / DFSC, packaged as a community plugin.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "icon": "node scripts/make-icon.mjs"
+  }
+}
