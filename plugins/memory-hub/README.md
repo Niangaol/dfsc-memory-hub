@@ -122,7 +122,7 @@ MCP 进程的工作目录被宿主锚定到插件目录，拿不到用户项目�
 
 - 上游仓库：[Niangaol/dfsc-memory-hub](https://github.com/Niangaol/dfsc-memory-hub)，资源目录 `plugins/memory-hub`。
 - 最低宿主：`>=0.4.0`（清单形态在 0.4.0 的插件格式内）。
-- 已验证：Node.js 24（Windows）下 `node --test` 全套 106 项通过；`scripts/smoke.mjs` 走真实
+- 已验证：Node.js 24（Windows）下 `node --test` 全套 109 项通过；`scripts/smoke.mjs` 走真实
   stdio 闭环 12 步（初始化 → 写入 → 去重 → 脱敏 → 召回 → 失效 → 摘要 → 归纳 → 统计 →
   落盘检查 → 清空 → 坏输入恢复）；`scripts/eval.mjs` 的跨会话检索评估 8 正样本全中、
   2 负样本返回空；市场校验器 `plugin_manifest` / `plugin_classification` / `checkMetadata`

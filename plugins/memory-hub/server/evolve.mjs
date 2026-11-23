@@ -9,7 +9,7 @@
  *
  * 常数集中在此，改行为只改这里。
  */
-import { cosine, normalize, queryTokens, tokens } from './text.mjs';
+import { cosine, isStopword, normalize, queryTokens, tokens } from './text.mjs';
 
 // 0.92 而不是更低：中文二元组让「构建用 pnpm」和「构建用 npm」相似度就到 0.83，
 // 阈值一松就会把互相矛盾的结论并入同一条，等于丢掉「后来改主意了」这件事。
@@ -32,6 +32,9 @@ const QUALITY = { weight: 0.5, recency: 0.3, tags: 0.2 };
 // 中文单字几乎出现在每句中文里，只配单字等于没配；二字组才有区分度。
 const BIGRAM_WEIGHT = 1;
 const UNIGRAM_WEIGHT = 0.35;
+const LATIN_WEIGHT = 1;
+// 只靠单字命中的文档要显著打折：中文单字偶然重合太常见。
+const SINGLE_CHAR_ONLY_PENALTY = 0.25;
 // 与 query 完全无关的条目给一个极低的底分，而不是 0：让「没有匹配」可被调用方
 // 用阈值判断（recall 自己会按 relevance 过滤，这个底分只影响排序稳定性）。
 const FLOOR = 0.02;
@@ -82,26 +85,55 @@ export function score(memory, query, now = Date.now(), { queryTags = [], idf = u
 /**
  * 按 idf 加权的重合度，0..1。
  *
- * 为什么要 idf：中文里「记忆」「文件」「用」这类词几乎出现在所有条目里，
- * 按余弦算它们能贡献大部分分数，真正的区分词（"pnpm"、"exist"）反而被稀释。
- * 这里对「出现在越少条目里的词」给越高权重，并且二字组权重高于单字。
+ * 为什么要 idf：中文里「记忆」「文件」这类词几乎出现在所有条目里，
+ * 按余弦算它们能贡献大部分分数，真正的区分词（"pnpm"、"memories"）反而被稀释。
+ *
+ * 两条关键规则：
+ *   1. 停用单字不进分母（「是/什么/的」几乎每句都有）。
+ *   2. 库里从未出现过的查询词也不进分母。中文按二字组切分，查询会带出
+ *      「户喜」「欢什」「么风」这类只属于这句话的碎片；它们不可能命中任何条目，
+ *      留在分母里只会把真正的命中摊薄到门槛以下（实测「用户喜欢什么风格」
+ *      因此从命中变成查不到）。
+ *
+ * 因此当 idf 可用时，分母只统计「库里有文档包含它」的词——这也是唯一可能
+ * 产生命中的词。没有 idf 时退回统计除停用词外的全部词元。
  */
 export function relevance(needles, memoryTokens, idf = undefined) {
   if (!needles?.length || !memoryTokens?.length) return 0;
   const memorySet = new Set(memoryTokens);
+  const candidates = [...new Set(needles)];
+  const weighted = [];
+  for (const token of candidates) {
+    const weight = tokenWeight(token) * (idf ? idf(token) : 1);
+    if (weight > 0) weighted.push({ token, weight });
+  }
+  // 查询里每个词都是停用字或库里没见过：确实不相关，不虚构分数。
+  if (!weighted.length) return 0;
   let matched = 0;
   let total = 0;
-  for (const token of new Set(needles)) {
-    const weight = tokenWeight(token) * (idf ? idf(token) : 1);
+  let bigramMatched = 0;
+  for (const { token, weight } of weighted) {
     total += weight;
-    if (memorySet.has(token)) matched += weight;
+    if (memorySet.has(token)) {
+      matched += weight;
+      if ([...token].length >= 2) bigramMatched += 1;
+    }
   }
-  return total === 0 ? 0 : matched / total;
+  if (total === 0) return 0;
+  const ratio = matched / total;
+  // 只有单字命中时显著打折：那种「相关」几乎总是巧合。
+  return bigramMatched === 0 ? ratio * SINGLE_CHAR_ONLY_PENALTY : ratio;
 }
 
 function tokenWeight(token) {
-  if (/^[a-z0-9_+-]+$/u.test(token)) return BIGRAM_WEIGHT; // 拉丁整词：有区分度
-  return [...token].length >= 2 ? BIGRAM_WEIGHT : UNIGRAM_WEIGHT;
+  // 拉丁整词最有区分度。
+  if (/^[a-z0-9_+-]+$/u.test(token)) return LATIN_WEIGHT;
+  // 二字组次之。
+  if ([...token].length >= 2) return BIGRAM_WEIGHT;
+  // 单字只作为「锦上添花」：中文单字太容易偶然命中（「数据库索引优化」里
+  // 只有「数」在库中出现过，却能算成满命中）。给低权重并额外打折，
+  // 保证「只靠单字命中」的文档不会越过相关度门槛。
+  return UNIGRAM_WEIGHT;
 }
 
 /** 从一批条目估 idf：只在越少条目出现越重要，用对数压缩。 */
@@ -114,8 +146,10 @@ export function idfFactory(texts) {
   }
   const total = Math.max(1, texts.length);
   return (token) => {
-    const df = documentFrequency.get(token) ?? 0;
-    // log(1 + N/(1+df)) 在 df 为 0 时最大：查询词在库里没见过，仍要能匹配上未来写入的条目。
+    const df = documentFrequency.get(token);
+    // 从未出现在任何文档里的词权重为 0：它不可能命中任何一条，
+    // 留在分母里只会稀释真正的命中。停用单字同样归零。
+    if (!df || isStopword(token)) return 0;
     return Math.log(1 + total / (1 + df));
   };
 }

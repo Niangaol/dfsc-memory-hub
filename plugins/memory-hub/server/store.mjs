@@ -348,9 +348,16 @@ export class MemoryBank {
     }
 
     // reflect 是只读的：不写命中计数、不改文件，因此分值只用于排序。
+    // 有 question 时必须和 recall 用同一道相关度门槛，否则证据包里会混进
+    // 只共享一个通用词的条目（实测 0.033 分的那条被当成「相关证据」）。
     const now = this.clock();
-    const ranked = rows
-      .map((memory) => ({ memory, score: question ? score(memory, question, now) : effectiveWeight(memory, now) }))
+    const needles = question ? queryTokens(question) : null;
+    const idf = question ? idfFactory(rows.map((memory) => searchText(memory))) : undefined;
+    const relevant = needles
+      ? rows.filter((memory) => relevance(needles, tokens(searchText(memory)), idf) >= RELEVANCE_FLOOR)
+      : rows;
+    const ranked = relevant
+      .map((memory) => ({ memory, score: question ? score(memory, question, now, { idf }) : effectiveWeight(memory, now) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, limit)
       .map(({ memory, score: value }) => ({ ...memory, score: value }));

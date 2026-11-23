@@ -49,9 +49,10 @@ plugins/memory-hub/
 ## 开发
 
 ```bash
-node --test tests/*.test.mjs     # 106 项：单元 + 协议层 + 边界 + 健壮性
+node --test tests/*.test.mjs     # 109 项：单元 + 协议层 + 边界 + 健壮性
 node scripts/smoke.mjs           # 真实 stdio 闭环 12 步
 node scripts/eval.mjs            # 两次会话的检索效果评估（8 正样本 + 2 负样本）
+node scripts/verify-fixes.mjs    # 逐条实测 0.2.0 的每个修复项（11 项）
 node scripts/make-icon.mjs       # 重新生成图标
 ```
 

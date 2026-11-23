@@ -326,13 +326,25 @@ test('reflect groups evidence by type and flags conflicts', async () => {
   await withBank(async (bank) => {
     await bank.retain({ text: '构建用 pnpm', type: 'fact', tags: ['构建'], project: PROJECT });
     const old = await bank.retain({ text: '构建用 npm', type: 'fact', tags: ['构建'], project: PROJECT });
-    await bank.retain({ text: '先写测试', type: 'lesson', tags: ['测试'], project: PROJECT });
+    await bank.retain({ text: '构建前先跑 lint 再写测试', type: 'lesson', tags: ['构建'], project: PROJECT });
     await bank.edit({ op: 'invalidate', id: old.id, project: PROJECT });
     const result = await bank.reflect({ question: '构建', project: PROJECT });
     assert.equal(result.ok, true);
     assert.deepEqual(Object.keys(result.groups).sort(), ['fact', 'lesson']);
     assert.ok(result.conflicts.some((c) => c.some((m) => m.id === old.id)), 'invalidated memories are listed as superseded evidence');
     assert.match(result.note, /组装|assembly/i);
+  });
+});
+
+test('reflect drops evidence that only shares a generic word with the question', async () => {
+  await withBank(async (bank) => {
+    await bank.retain({ text: '构建用 pnpm workspaces', type: 'fact', tags: ['构建'], project: PROJECT });
+    // 只共享「是」这类通用词，相关度在门槛以下：不该被当成证据返回。
+    await bank.retain({ text: '部署是由运维手动触发的', type: 'fact', tags: ['部署'], project: PROJECT });
+    const result = await bank.reflect({ question: '构建是用什么工具跑的', project: PROJECT });
+    const texts = Object.values(result.groups).flat().map((memory) => memory.text);
+    assert.equal(texts.length, 1, `unexpected evidence: ${JSON.stringify(texts)}`);
+    assert.match(texts[0], /pnpm/);
   });
 });
 

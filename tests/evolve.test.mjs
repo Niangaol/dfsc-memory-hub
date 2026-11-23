@@ -63,6 +63,26 @@ test('relevance weights rare tokens above words every memory shares', () => {
   assert.equal(common, 0, 'a memory that never mentions the distinctive token is not relevant');
 });
 
+test('query fragments absent from every document do not dilute the denominator', () => {
+  const texts = ['用户要求所有产出中文', '构建用 pnpm workspaces'];
+  const idf = idfFactory(texts);
+  // 「户喜」「欢什」「么风」这类碎片只属于这句问法，库里没有，不该占分母
+  const value = relevance(queryTokens('用户喜欢什么风格'), tokens(texts[0]), idf);
+  assert.ok(value >= 0.12, `expected the real match to clear the floor, got ${value}`);
+});
+
+test('a single shared character is heavily discounted', () => {
+  const texts = ['必须靠工具参数 project 显式传', '构建用 pnpm workspaces'];
+  const idf = idfFactory(texts);
+  // 「数据库索引优化」里只有「数」在第一条出现过，属于偶然重合
+  const coincidence = relevance(queryTokens('数据库索引优化'), tokens(texts[0]), idf);
+  const unrelated = relevance(queryTokens('数据库索引优化'), tokens(texts[1]), idf);
+  // 对照：一个真正讲到目标的二字组命中
+  const genuine = relevance(queryTokens('构建怎么跑'), tokens(texts[1]), idf);
+  assert.equal(unrelated, 0, 'no shared token at all');
+  assert.ok(coincidence < genuine, `single-char coincidence ${coincidence} must rank below a real match ${genuine}`);
+});
+
 test('searchText includes tags so hand-written keywords are findable', () => {
   assert.match(searchText({ text: '正文', tags: ['构建', '测试'] }), /构建/u);
   assert.equal(searchText({ text: '正文' }), '正文');
