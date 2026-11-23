@@ -12,6 +12,23 @@
 const CJK = /\p{Script=Han}+/gu;
 const LATIN = /[\p{L}\p{N}_-]+/gu;
 
+// 少量同义展开：只覆盖「问偏好时用的口语词」和「问坑时用的口语词」这两类
+// 真实出现过的检索失败（"用户喜欢什么风格" 查不到只写「要求」的条目）。
+// 刻意保持很小：表越大，错配越难解释；宁可漏召回，不可乱召回。
+const SYNONYMS = new Map([
+  ['风格', ['偏好', '要求', '口味', '习惯']],
+  ['喜欢', ['偏好', '要求', '习惯']],
+  ['偏好', ['要求', '习惯']],
+  ['口味', ['偏好', '要求']],
+  ['规范', ['约定', '要求']],
+  ['约定', ['规范', '要求']],
+  ['坑', ['陷阱', '注意', '问题']],
+  ['踩坑', ['陷阱', '注意']],
+  ['报错', ['错误', '失败', '异常']],
+  ['存哪', ['路径', '位置', '存放']],
+  ['在哪', ['路径', '位置']],
+]);
+
 export function normalize(value) {
   return String(value ?? '').normalize('NFKC').replace(/\s+/gu, ' ').trim().toLowerCase();
 }
@@ -36,6 +53,21 @@ export function tokens(value) {
     if (word) out.push(word);
   }
   return out;
+}
+
+/**
+ * 查询侧的分词：在 tokens 之上加同义展开。
+ *
+ * 只在查询侧展开，写入侧保持原样：记忆文件里存的是作者原话，
+ * 不会被同义词表改写；检索时多给几个等价说法。
+ */
+export function queryTokens(value) {
+  const base = tokens(value);
+  const extra = [];
+  for (const token of new Set(base)) {
+    for (const synonym of SYNONYMS.get(token) ?? []) extra.push(...tokens(synonym));
+  }
+  return extra.length ? [...base, ...extra] : base;
 }
 
 function counts(items) {

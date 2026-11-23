@@ -16,15 +16,18 @@ import path from 'node:path';
 import { JsonStore } from './json-store.mjs';
 import {
   DECAY_DAYS, GLOBAL_CAP, MAX_TAGS, MAX_TAG_LENGTH, MAX_TEXT, PROJECT_CAP,
-  RECALL_LIMIT_MAX, applyDecay, effectiveWeight, evictOverflow, findMergeCandidate, score,
+  RECALL_LIMIT_MAX, applyDecay, effectiveWeight, evictOverflow, findMergeCandidate, idfFactory, relevance, score, searchText,
 } from './evolve.mjs';
-import { clip, normalize, redact, tidy, tokens } from './text.mjs';
+import { clip, normalize, queryTokens, redact, tidy, tokens } from './text.mjs';
 import { resolveProject } from './project.mjs';
 
 export const TYPES = ['fact', 'decision', 'lesson', 'preference', 'pitfall'];
 export const STATUSES = ['active', 'invalidated', 'archived'];
 const BANK_VERSION = 1;
 const GLOBAL_SLUG = '_global';
+// idf 加权后，完全不沾边的查询大致落在 0.05 以下；0.12 能把「只共享通用词」的
+// 条目挡掉，又不会误伤「只命中一个区分词」的条目（实测单命中约 0.2 以上）。
+const RELEVANCE_FLOOR = 0.12;
 
 export function defaultHome(env = process.env) {
   const override = String(env?.MEMORY_HUB_HOME ?? '').trim();
@@ -204,19 +207,16 @@ export class MemoryBank {
     if (scope === 'project' || scope === 'all') banks.push({ bank: 'project', slug: resolved.slug });
     if (scope === 'global' || scope === 'all') banks.push({ bank: 'global', slug: GLOBAL_SLUG });
 
-    // 有 query 时要求文本确有交集：标签只能收窄范围或加权，不能单独把一条记忆
-    // 变成「和这个查询相关」，否则按标签筛完之后会把毫不相干的条目也返回。
-    const queryTokens = query ? tokens(query) : [];
-    const probe = queryTokens.filter((token) => [...token].length > 1 || /^[a-z0-9_]+$/u.test(token));
-    const needles = probe.length ? probe : queryTokens;
-
+    // 有 query 时先读全部候选，用 idf 加权的重合度打分，再按相关度阈值过滤。
+    // 只按「词元是否有交集」过滤太粗：中文单字让每句话都沾边，
+    // 需要 idf 把「几乎每条都有」的词压低，让真正的区分词决定排名。
     const picked = [];
     let scanned = 0;
     for (const { bank, slug } of banks) {
       const store = this.store(slug);
       const rows = await store.mutate((data) => {
         const value = readBank(data, slug);
-        const hits = [];
+        const candidates = [];
         for (const memory of value.memories) {
           if (status !== 'all' && memory.status !== status) continue;
           if (status === 'active' && memory.status !== 'active') continue;
@@ -224,13 +224,24 @@ export class MemoryBank {
           const owned = new Set((memory.tags ?? []).map((tag) => normalize(tag)));
           const tagOverlap = [...wanted].filter((tag) => owned.has(tag)).length;
           if (wanted.size && !tagOverlap) continue;
-          scanned += 1;
-          const similarity = query ? score(memory, query, now, { queryTags }) : effectiveWeight(memory, now);
+          candidates.push({ memory, tagOverlap });
+        }
+        scanned += candidates.length;
+        if (!candidates.length) return { result: [], next: data };
+
+        // idf 用正文 + 标签一起估：标签本来就是手写关键词，应当能被搜到。
+        const idf = query ? idfFactory(candidates.map(({ memory }) => searchText(memory))) : undefined;
+        const hits = [];
+        for (const { memory, tagOverlap } of candidates) {
           if (query) {
-            const textTokens = new Set(tokens(memory.text));
-            if (!needles.some((token) => textTokens.has(token))) continue;
+            // 给了 query 就必须在正文或标签里真的讲到它：标签只用来收窄范围与加权，
+            // 不能让一条完全没提到查询词的记忆因为标签相同而返回。
+            if (relevance(queryTokens(query), tokens(searchText(memory)), idf) < RELEVANCE_FLOOR) continue;
           }
-          hits.push({ ...memory, score: similarity, bank, tags: memory.tags ?? [] });
+          const value2 = query
+            ? score(memory, query, now, { queryTags, idf })
+            : effectiveWeight(memory, now);
+          hits.push({ ...memory, score: value2, bank, tags: memory.tags ?? [] });
         }
         let changed = false;
         for (const hit of hits) {

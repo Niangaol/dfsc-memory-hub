@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   effectiveWeight, score, findMergeCandidate, applyDecay, evictOverflow,
-  MERGE_THRESHOLD, DECAY_DAYS, PROJECT_CAP,
+  MERGE_THRESHOLD, DECAY_DAYS, PROJECT_CAP, idfFactory, relevance, searchText,
 } from '../plugins/memory-hub/server/evolve.mjs';
+import { queryTokens, tokens } from '../plugins/memory-hub/server/text.mjs';
 
 const DAY = 86_400_000;
 const now = Date.UTC(2026, 10, 23);
@@ -43,6 +44,34 @@ test('score rewards tag overlap', () => {
   const plain = score(memory({ text: 'zzz', tags: [] }), '构建', now, { queryTags: ['构建'] });
   const tagged = score(memory({ text: 'zzz', tags: ['构建'] }), '构建', now, { queryTags: ['构建'] });
   assert.ok(tagged > plain);
+});
+
+test('an unrelated memory scores near zero instead of a quality baseline', () => {
+  // 早期实现里「权重 + 新近度」是无条件加分，零重叠条目也能拿 0.45。
+  const unrelated = score(memory({ text: '完全无关的部署琐事', importance: 1, hits: 50 }), '构建用 pnpm', now);
+  const relevant = score(memory({ text: '构建用 pnpm workspaces', importance: 0.3 }), '构建用 pnpm', now);
+  assert.ok(unrelated < 0.1, `unrelated should be near zero, got ${unrelated}`);
+  assert.ok(relevant > unrelated * 3, `relevant ${relevant} should clearly beat ${unrelated}`);
+});
+
+test('relevance weights rare tokens above words every memory shares', () => {
+  const texts = ['记忆库存在 memories 目录', '记忆里有一条结论', '记忆会随时间归档'];
+  const idf = idfFactory(texts);
+  const rare = relevance(queryTokens('memories 在哪'), tokens(texts[0]), idf);
+  const common = relevance(queryTokens('memories 在哪'), tokens(texts[1]), idf);
+  assert.ok(rare > common, `rare token should win: ${rare} vs ${common}`);
+  assert.equal(common, 0, 'a memory that never mentions the distinctive token is not relevant');
+});
+
+test('searchText includes tags so hand-written keywords are findable', () => {
+  assert.match(searchText({ text: '正文', tags: ['构建', '测试'] }), /构建/u);
+  assert.equal(searchText({ text: '正文' }), '正文');
+});
+
+test('queryTokens expands a small synonym table without touching stored text', () => {
+  const expanded = queryTokens('用户喜欢什么风格');
+  assert.ok(expanded.includes('偏好') || expanded.includes('要求'), `expected synonym expansion, got ${expanded.join(',')}`);
+  assert.ok(!tokens('用户要求所有产出中文').includes('偏好'), 'stored text keeps the author wording');
 });
 
 test('findMergeCandidate merges identical normalised text', () => {

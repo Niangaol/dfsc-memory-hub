@@ -9,7 +9,7 @@
  *
  * 常数集中在此，改行为只改这里。
  */
-import { cosine, normalize, tokens } from './text.mjs';
+import { cosine, normalize, queryTokens, tokens } from './text.mjs';
 
 // 0.92 而不是更低：中文二元组让「构建用 pnpm」和「构建用 npm」相似度就到 0.83，
 // 阈值一松就会把互相矛盾的结论并入同一条，等于丢掉「后来改主意了」这件事。
@@ -25,7 +25,16 @@ export const MAX_TAG_LENGTH = 32;
 export const RECALL_LIMIT_MAX = 20;
 
 const DAY_MS = 86_400_000;
-const WEIGHTS = { similarity: 0.45, weight: 0.25, recency: 0.2, tags: 0.1 };
+// 相关度是乘数，不是加数。早期实现把「权重 + 新近度」当独立加分项，
+// 实测零重叠的条目也能拿 0.45 分（查 "pnpm" 时一条无关记忆排到第二），
+// 于是检索结果被重要度和时间主导，而不是被「是否真的讲到这件事」主导。
+const QUALITY = { weight: 0.5, recency: 0.3, tags: 0.2 };
+// 中文单字几乎出现在每句中文里，只配单字等于没配；二字组才有区分度。
+const BIGRAM_WEIGHT = 1;
+const UNIGRAM_WEIGHT = 0.35;
+// 与 query 完全无关的条目给一个极低的底分，而不是 0：让「没有匹配」可被调用方
+// 用阈值判断（recall 自己会按 relevance 过滤，这个底分只影响排序稳定性）。
+const FLOOR = 0.02;
 
 function daysSince(iso, now) {
   const time = Date.parse(iso ?? '');
@@ -44,17 +53,71 @@ function recency(memory, now) {
   return 1 / (1 + daysSince(memory?.updatedAt ?? memory?.createdAt, now) / 30);
 }
 
-/** 召回打分。queryTags 命中时加标签分，其余按文本相似度。 */
-export function score(memory, query, now = Date.now(), { queryTags = [] } = {}) {
-  const similarity = cosine(tokens(query), tokens(memory?.text));
-  const weight = effectiveWeight(memory, now);
-  const fresh = recency(memory, now);
+/** 条目参与检索的正文：text + tags。标签是作者手写的关键词，理应可被检索。 */
+export function searchText(memory) {
+  const tags = Array.isArray(memory?.tags) ? memory.tags.join(' ') : '';
+  return tags ? `${memory?.text ?? ''} ${tags}` : String(memory?.text ?? '');
+}
+
+/** 召回打分：相关度（乘）质量（加）。queryTags 命中提升相关度。 */
+export function score(memory, query, now = Date.now(), { queryTags = [], idf = undefined } = {}) {
+  const wantedTokens = queryTokens(query);
+  const memoryTokens = tokens(searchText(memory));
+  const relevant = relevance(wantedTokens, memoryTokens, idf);
   const wanted = new Set(queryTags.map((tag) => normalize(tag)).filter(Boolean));
   const owned = new Set((memory?.tags ?? []).map((tag) => normalize(tag)));
   let tagHits = 0;
   for (const tag of wanted) if (owned.has(tag)) tagHits += 1;
   const tagScore = wanted.size === 0 ? 0 : tagHits / wanted.size;
-  return WEIGHTS.similarity * similarity + WEIGHTS.weight * weight + WEIGHTS.recency * fresh + WEIGHTS.tags * tagScore;
+  const quality = QUALITY.weight * effectiveWeight(memory, now)
+    + QUALITY.recency * recency(memory, now)
+    + QUALITY.tags * tagScore;
+  // 正文重合决定是否相关；标签相同可以加权，但最多把相关度补到 0.5——
+  // 它不能把「正文完全没讲到」的条目抬到和真命中一样高。
+  // recall 另有一道正文相关度过滤，所以标签只能提升排序，不能决定是否返回。
+  const relevanceScore = Math.max(relevant, tagScore * 0.5);
+  return FLOOR + relevanceScore * quality;
+}
+
+/**
+ * 按 idf 加权的重合度，0..1。
+ *
+ * 为什么要 idf：中文里「记忆」「文件」「用」这类词几乎出现在所有条目里，
+ * 按余弦算它们能贡献大部分分数，真正的区分词（"pnpm"、"exist"）反而被稀释。
+ * 这里对「出现在越少条目里的词」给越高权重，并且二字组权重高于单字。
+ */
+export function relevance(needles, memoryTokens, idf = undefined) {
+  if (!needles?.length || !memoryTokens?.length) return 0;
+  const memorySet = new Set(memoryTokens);
+  let matched = 0;
+  let total = 0;
+  for (const token of new Set(needles)) {
+    const weight = tokenWeight(token) * (idf ? idf(token) : 1);
+    total += weight;
+    if (memorySet.has(token)) matched += weight;
+  }
+  return total === 0 ? 0 : matched / total;
+}
+
+function tokenWeight(token) {
+  if (/^[a-z0-9_+-]+$/u.test(token)) return BIGRAM_WEIGHT; // 拉丁整词：有区分度
+  return [...token].length >= 2 ? BIGRAM_WEIGHT : UNIGRAM_WEIGHT;
+}
+
+/** 从一批条目估 idf：只在越少条目出现越重要，用对数压缩。 */
+export function idfFactory(texts) {
+  const documentFrequency = new Map();
+  for (const text of texts) {
+    for (const token of new Set(tokens(text))) {
+      documentFrequency.set(token, (documentFrequency.get(token) ?? 0) + 1);
+    }
+  }
+  const total = Math.max(1, texts.length);
+  return (token) => {
+    const df = documentFrequency.get(token) ?? 0;
+    // log(1 + N/(1+df)) 在 df 为 0 时最大：查询词在库里没见过，仍要能匹配上未来写入的条目。
+    return Math.log(1 + total / (1 + df));
+  };
 }
 
 /**

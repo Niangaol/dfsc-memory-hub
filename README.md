@@ -16,8 +16,7 @@ DFSC 的会话默认记不住上一次的事。装好之后，代理可以自己
 | 会话结束自动压缩成心智模型 | `/memory consolidate` + `memory-curate` 技能 | DFSC 没有会话结束钩子，做不到自动触发 |
 | 开局自动注入 system prompt | `memory-recall` 技能要求代理先 recall | 同上 |
 | 可接 Hindsight / Mnemopi 后端 | 只有本地 JSON | 插件进程拿不到宿主模型 Key，外部后端也无从调用 |
-| 向量检索 | 词元相似度（拉丁整词 + 汉字单字与二字组） | 零依赖、零下载、可离线验证 |
-| 模型驱动的摘要 | 确定性规则：合并、加权、衰减、淘汰 | 不需要模型也能真实地"进化"，且每一行都可测 |
+| 向量检索 | 词元相似度（拉丁整词 + 汉字单字与二字组） | 零依赖、零下载、可离线验证 || 模型驱动的摘要 | 确定性规则：合并、加权、衰减、淘汰 | 不需要模型也能真实地"进化"，且每一行都可测 |
 
 所以「自进化」在这里不是宣传词，是四条能单独测试的规则：写入合并、召回强化、
 过期归档、容量淘汰。
@@ -48,8 +47,9 @@ plugins/memory-hub/
 ## 开发
 
 ```bash
-node --test tests/*.test.mjs     # 75 项：单元 + 协议层
+node --test tests/*.test.mjs     # 84 项：单元 + 协议层 + 边界
 node scripts/smoke.mjs           # 真实 stdio 闭环 12 步
+node scripts/eval.mjs            # 两次会话的检索效果评估（8 正样本 + 2 负样本）
 node scripts/make-icon.mjs       # 重新生成图标
 ```
 
