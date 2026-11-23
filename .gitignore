@@ -6,3 +6,13 @@ test-results/
 .env
 .env.*
 *.log
+
+# 记忆库的运行时目录。DFSC 把它放在 ~/.stepcode/agent/memories，
+# 但设置 MEMORY_HUB_HOME 指向仓库时会在仓库里生成 <项目slug>/memory.json。
+# 那是用户数据，不是源码，绝不提交。
+--*/
+_global/
+*.corrupt-*
+*.trash-*
+*.lock
+*.tmp
