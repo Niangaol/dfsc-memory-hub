@@ -5,8 +5,10 @@ description: 查看或整理项目记忆：stats 看概况、load 取回相关�
 处理记忆请求：$ARGUMENTS
 
 按第一个词分派。没有参数时默认 `stats`。所有调用都要带 `project` 为当前工作区的绝对路径。
+工具名以宿主 `/mcp` 列出的为准（本机是 `memory-hub__memory__<工具名>`）；
+下文写的是不带前缀的工具名。
 
-- `stats` → 调 `memory-hub__memory__stats`，用中文汇报：本次解析到的项目 slug 与来源
+- `stats` → 调 `stats`，用中文汇报：本次解析到的项目 slug 与来源
   （arg / env / session / fallback）、项目库与全局库的 active/invalidated/archived 数量、
   容量上限、热门标签、库文件路径、是否损坏。
   如果 `source` 是 `session` 或 `fallback`，说明归属可能是猜的，提示用户。
